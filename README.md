@@ -26,7 +26,7 @@
 - [Full pipeline](#full-pipeline)
 - [Design notes — the frontier techniques](#design-notes--the-frontier-techniques)
 - [Testing](#testing)
-- [Hardware notes](#hardware-notes)
+- [Hardware requirements](#hardware-requirements)
 - [Known limitations & roadmap](#known-limitations--roadmap)
 - [License & acknowledgements](#license--acknowledgements)
 
@@ -348,9 +348,27 @@ Covers: parameter counts, output shapes, forward + (main & MTP) loss, gradient f
 
 ---
 
-## Hardware notes
+## Hardware requirements
 
-This is a real architecture, not a toy. The `tiny` config runs on CPU; the **3B/7B/13B configs are intended for datacenter GPUs (A100 / H200 / B200 or better)** with FSDP multi-GPU and FlashAttention-3. Do not expect the large configs to train on a laptop.
+**EN** — This is a real architecture, not a toy. Because the tokenizer vocab is **151,669** and the LM head is untied, the *actual* parameter count is higher than the nominal name (the "7B" config is ~8.2B params). The `tiny` config is for CPU tests only.
+
+**TH** — สถาปัตยกรรมจริง ไม่ใช่ของเล่น เนื่องจาก vocab = 151,669 และ LM head แยกชิ้น จำนวนพารามิเตอร์จริงจึงมากกว่าชื่อ (config "7B" จริงๆ ~8.2B) — config `tiny` ไว้รันเทสต์บน CPU เท่านั้น
+
+| Config | Actual params | **Training** (AdamW, bf16, FSDP) | **Inference** bf16 | **Inference** 4-bit |
+|---|---|---|---|---|
+| `tiny_llm` | ~80M | CPU / any GPU | CPU | — |
+| `pilot_3b` | ~3.75B | ~60 GB states → **2–4× A100/H100 80GB** | 1× 16–24GB (RTX 4090 / A10) | 1× ~8GB |
+| `main_7b` | ~8.22B | ~132 GB states → **4–8× A100/H100 80GB** | 1× 24–40GB (A100 40GB) | 1× ~12GB |
+| `full_13b` | ~14.77B | ~236 GB states → **8–16× A100/H100/H200** | 1× 48–80GB | 1× 16–24GB |
+
+**How to read the training column.** "States" ≈ `params × 16 bytes` (bf16 weights + bf16 grads + fp32 master + Adam m/v) for the optimizer/model **only**. FSDP shards this across GPUs (per-GPU ≈ states ÷ N). On top of that you need **activation memory**, which grows with batch size and sequence length — at 128K context it dominates. Mitigations: **gradient checkpointing**, smaller pre-training sequence length, gradient accumulation (configs already use `batch_size: 1` + accumulation), and FSDP CPU offload.
+
+**Recommendations**
+- **FlashAttention-3** is strongly recommended for the long-context *local* layers — it requires Hopper/Blackwell GPUs (**H100 / H200 / B200**). Without it, local layers fall back to SDPA and **error out past 8K** tokens to prevent OOM.
+- Inference VRAM above counts **weights only**; add KV-cache memory. GQA + hybrid local-window keeps it modest, but full 128K *global* context still adds several GB.
+- Multi-node training works via `torchrun` + FSDP (NCCL backend); see step 2.
+
+> Numbers are rough planning estimates (weights/optimizer only, activations excluded). Always benchmark on your actual setup.
 
 ---
 
