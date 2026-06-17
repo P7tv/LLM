@@ -210,13 +210,44 @@ class HybridGQAAttention(nn.Module):
             )
 
     # ─────────────────────────────────────────────────────────────────
+    def _decode_forward(
+        self,
+        q: torch.Tensor,   # [B, q_heads,  T,  head_dim]
+        k: torch.Tensor,   # [B, kv_heads, Tc, head_dim]
+        v: torch.Tensor,   # [B, kv_heads, Tc, head_dim]
+        T: int,
+    ) -> torch.Tensor:
+        """
+        Incremental decode with KV-cache.
+        T queries (โดยทั่วไป T=1) attend ทับ cached keys ทั้งหมด.
+        ใช้ SDPA เสมอ — attention matrix เล็ก ([T × Tc]) จึงไม่เสี่ยง OOM
+        และไม่ต้องพึ่ง FA3 kvcache API.
+        """
+        k = self._repeat_kv(k)   # GQA expand → [B, q_heads, Tc, head_dim]
+        v = self._repeat_kv(v)
+        # T==1: ทุก cached key อยู่ในอดีตของ query เสมอ → causal=False ถูกต้อง
+        # T>1 : ใช้ bottom-right causal alignment (q_len < kv_len)
+        return F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p = 0.0,
+            is_causal = T > 1,
+        )
+
+    # ─────────────────────────────────────────────────────────────────
     def forward(
         self,
-        x:            torch.Tensor,                    # [B, T, hidden]
-        position_ids: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-
+        x:              torch.Tensor,                    # [B, T, hidden]
+        position_ids:   Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache:      bool = False,
+    ):
+        """
+        Returns (attn_out, present_key_value)
+          attn_out — [B, T, hidden]
+          present  — (k, v) cache (kv_heads, un-repeated) ถ้า use_cache else None
+        """
         B, T, _ = x.shape
+        past_len = past_key_value[0].shape[2] if past_key_value is not None else 0
 
         # 1. Project Q K V
         q = self.q_proj(x)   # [B, T, q_heads * head_dim]
@@ -235,12 +266,39 @@ class HybridGQAAttention(nn.Module):
             q = self.q_norm(q)   # norm ทีละ head [B, heads, T, head_dim]
             k = self.k_norm(k)
 
-        # 4. Apply RoPE AFTER QK-Norm
-        cos, sin = self.rotary_emb(T, position_ids)
+        # 4. Apply RoPE AFTER QK-Norm — ใช้ตำแหน่งสัมบูรณ์ [past_len .. past_len+T-1]
+        if position_ids is None and past_len > 0:
+            position_ids = torch.arange(
+                past_len, past_len + T, device=x.device
+            ).unsqueeze(0).expand(B, T)
+        cos, sin = self.rotary_emb(past_len + T, position_ids)
         q, k = apply_rotary_emb(q, k, cos, sin)
 
-        # ✅ 6. Hybrid Attention — FA3 kernel หรือ SDPA fallback
-        if _FA3_AVAILABLE:
+        # 5. KV-cache — ต่อ past เข้ากับ key/value ปัจจุบัน
+        is_decode = past_key_value is not None
+        if is_decode:
+            k = torch.cat([past_key_value[0], k], dim=2)
+            v = torch.cat([past_key_value[1], v], dim=2)
+            # Local layer เก็บแค่ window ล่าสุดพอ
+            if self.is_local and k.shape[2] > self.sliding_window:
+                k = k[:, :, -self.sliding_window:, :]
+                v = v[:, :, -self.sliding_window:, :]
+
+        # 6. สร้าง present cache (เก็บแบบ kv_heads ก่อน repeat → ประหยัด memory)
+        present = None
+        if use_cache:
+            if self.is_local and not is_decode and k.shape[2] > self.sliding_window:
+                present = (
+                    k[:, :, -self.sliding_window:, :],
+                    v[:, :, -self.sliding_window:, :],
+                )
+            else:
+                present = (k, v)
+
+        # ✅ 7. Attention — decode / FA3 / SDPA fallback
+        if is_decode:
+            out = self._decode_forward(q, k, v, T)
+        elif _FA3_AVAILABLE:
             # FlashAttention-3 handles GQA natively without repeating KV heads
             out = self._flash_forward(q, k, v)
         else:
@@ -249,11 +307,11 @@ class HybridGQAAttention(nn.Module):
             v = self._repeat_kv(v)
             out = self._sdpa_forward(q, k, v, T)
 
-        # 7. Reshape + Output projection
+        # 8. Reshape + Output projection
         out = out.transpose(1, 2).contiguous().view(
             B, T, self.num_q_heads * self.head_dim
         )
-        return self.o_proj(out)
+        return self.o_proj(out), present
 
     def extra_repr(self) -> str:
         return (

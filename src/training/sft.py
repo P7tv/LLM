@@ -99,7 +99,8 @@ def train_sft(model_ckpt_path: str, tokenizer_path: str, sft_data: list[dict], c
     model.print_trainable_parameters()
     
     # 4. Prepare Dataset
-    dataset = SFTDataset(sft_data, tokenizer, max_seq_len=config["max_position_embeddings"])
+    max_seq_len = config.get("max_seq_len_sft", 4096)
+    dataset = SFTDataset(sft_data, tokenizer, max_seq_len=max_seq_len)
     dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True)
     
     # 5. Fine-Tuning Setup

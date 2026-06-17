@@ -199,7 +199,7 @@ def main():
             dt = t1 - t0
             t0 = t1
             # Compute loss and tokens processed per second
-            avg_loss = accumulated_loss
+            avg_loss = accumulated_loss / config["logging_steps"]
             last_logged_loss = avg_loss
             accumulated_loss = 0.0
             tokens_per_sec = (config["logging_steps"] * config["batch_size"] * config["gradient_accumulation_steps"] * config["max_position_embeddings"]) / dt

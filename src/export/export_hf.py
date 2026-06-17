@@ -14,6 +14,16 @@ def convert_to_hf(model_ckpt_path: str, hf_output_dir: str, config_path: str = "
     
     Qwen2 architecture natively supports QK-Normalization, GQA, and sliding window attention.
     """
+    import warnings
+    warnings.warn(
+        "Exporting to Qwen3ForCausalLM (Qwen2 architecture). "
+        "Note that Qwen2 uses a single sliding window config for the entire model. "
+        "The layer-wise hybrid-attention pattern (local x3 + global) of this model "
+        "will NOT be preserved in the exported Hugging Face model. "
+        "The model's attention behavior will differ from training. "
+        "Consider mapping to an architecture that supports layer-wise patterns (e.g., Gemma2) if needed."
+    )
+    
     os.makedirs(hf_output_dir, exist_ok=True)
     
     # 1. Load config

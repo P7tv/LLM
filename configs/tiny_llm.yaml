@@ -9,6 +9,7 @@ num_mtp_heads: 1        # 1 MTP head
 mtp_lambda: 0.3
 intermediate_size: 688  # FFN SwiGLU size
 max_position_embeddings: 1024
+max_seq_len_sft: 512    # Seq length cap for SFT/DPO (avoid padding to full context)
 rope_theta: 1000000.0   # 1M base frequency
 rms_norm_eps: 1.0e-5
 qk_norm: true           # Qwen3-style QK Normalization stability

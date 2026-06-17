@@ -63,8 +63,10 @@ def apply_rotary_emb(
     q, k   : [B, heads, T, head_dim]
     cos/sin: [T, head_dim] or [B, T, head_dim]
     """
-    cos = cos.to(dtype=q.dtype, device=q.device)
-    sin = sin.to(dtype=q.dtype, device=q.device)
+    cos = cos.float().to(device=q.device)
+    sin = sin.float().to(device=q.device)
+    q_fp32 = q.float()
+    k_fp32 = k.float()
     
     if cos.ndim == 2:
         cos = cos.unsqueeze(0).unsqueeze(0)   # [1, 1, T, head_dim]
@@ -73,6 +75,6 @@ def apply_rotary_emb(
         cos = cos.unsqueeze(1)                # [B, 1, T, head_dim]
         sin = sin.unsqueeze(1)
         
-    q_rot = q * cos + rotate_half(q) * sin
-    k_rot = k * cos + rotate_half(k) * sin
+    q_rot = (q_fp32 * cos + rotate_half(q_fp32) * sin).to(dtype=q.dtype)
+    k_rot = (k_fp32 * cos + rotate_half(k_fp32) * sin).to(dtype=q.dtype)
     return q_rot, k_rot

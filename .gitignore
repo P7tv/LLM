@@ -72,8 +72,15 @@ venv.bak/
 *.swp
 
 # Project specific
-scratch/
-checkpoints/
-data/
+# NOTE: paths are anchored with a leading slash so that ONLY the top-level
+# data/ output dir is ignored — the src/data/ source package stays tracked.
+/scratch/
+/checkpoints/
+/checkpoints_*/
+/data/
+/logs/
+/logs_*/
+/exported_model_hf/
 *.pt
+*.bin
 *.safetensors

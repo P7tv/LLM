@@ -21,6 +21,7 @@ config_13b = {
     # ── RoPE ───────────────────────────────────────────────────────
     "rope_theta":                1_000_000,
     "max_position_embeddings":   131_072,
+    "max_seq_len_sft":           4096,      # SFT/DPO seq cap
 
     # ── Norm ───────────────────────────────────────────────────────
     "rms_norm_eps":              1e-5,

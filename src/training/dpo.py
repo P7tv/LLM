@@ -93,8 +93,10 @@ def get_batch_logps(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     
     per_token_logps = torch.gather(log_probs, dim=-1, index=gather_labels.unsqueeze(-1)).squeeze(-1)
     
-    # Sum log probabilities across response sequence
-    return (per_token_logps * loss_mask).sum(-1)
+    # Sum log probabilities across response sequence (length-normalized)
+    sum_logps = (per_token_logps * loss_mask).sum(-1)
+    seq_lengths = loss_mask.sum(-1)
+    return sum_logps / torch.clamp(seq_lengths, min=1.0)
 
 
 def compute_dpo_loss(policy_chosen_logps: torch.Tensor, policy_rejected_logps: torch.Tensor,
@@ -117,9 +119,14 @@ def compute_dpo_loss(policy_chosen_logps: torch.Tensor, policy_rejected_logps: t
     return loss, chosen_rewards, reward_accuracies
 
 
-def train_dpo(model_sft_path: str, tokenizer_path: str, preference_data: list[dict], beta: float = 0.1, config_path: str = "configs/tiny_llm.yaml"):
+def train_dpo(model_sft_path: str, tokenizer_path: str, preference_data: list[dict], beta: float = 0.5, config_path: str = "configs/tiny_llm.yaml"):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
+
+    # get_batch_logps returns length-normalized (per-token mean) log-probs, so the
+    # chosen/rejected log-ratio is on a ~per-token scale. beta is raised from the
+    # classic sum-scale 0.1 to compensate; override via config["dpo_beta"].
+    beta = config.get("dpo_beta", beta)
 
     tokenizer = CustomTokenizer(tokenizer_path)
     
@@ -142,7 +149,8 @@ def train_dpo(model_sft_path: str, tokenizer_path: str, preference_data: list[di
     reference_model.to(device)
     
     # Prepare DPO dataset loader
-    dataset = DPODataset(preference_data, tokenizer, max_seq_len=config["max_position_embeddings"])
+    max_seq_len = config.get("max_seq_len_sft", 4096)
+    dataset = DPODataset(preference_data, tokenizer, max_seq_len=max_seq_len)
     dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True)
     
     optimizer = torch.optim.AdamW(policy_model.parameters(), lr=5e-6)

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Optional, Tuple
 
 from .rmsnorm  import RMSNorm
 from .attention import HybridGQAAttention
@@ -26,14 +26,18 @@ class TransformerBlock(nn.Module):
 
     def forward(
         self,
-        x:            torch.Tensor,                    # [B, T, hidden]
-        position_ids: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-
+        x:              torch.Tensor,                    # [B, T, hidden]
+        position_ids:   Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache:      bool = False,
+    ):
         # Attention sub-block
-        x = x + self.attn(self.attn_norm(x), position_ids)
+        attn_out, present = self.attn(
+            self.attn_norm(x), position_ids, past_key_value, use_cache
+        )
+        x = x + attn_out
 
         # FFN sub-block
         x = x + self.ffn(self.ffn_norm(x))
 
-        return x
+        return x, present

@@ -170,7 +170,7 @@ class CustomLLM(nn.Module):
 
         # ── 2. Transformer Blocks ─────────────────────────────────────
         for layer in self.layers:
-            x = layer(x, position_ids)         # [B, T, hidden]
+            x, _ = layer(x, position_ids)      # [B, T, hidden] (ไม่ใช้ cache ใน train/loss path)
 
         # ── 3. Final Norm ─────────────────────────────────────────────
         hidden = self.norm(x)                  # [B, T, hidden]
@@ -236,37 +236,70 @@ class CustomLLM(nn.Module):
         eos_token_id:   int   = 2,
     ) -> torch.Tensor:
         """
-        Greedy + Top-p sampling (inference only)
-        ไม่ใช้ KV-cache ยังในเวอร์ชันนี้ — Phase 2 เพิ่ม
+        Top-p (nucleus) sampling พร้อม KV-cache
+
+        Flow:
+          1. Prefill — รัน prompt ทั้งก้อนครั้งเดียว เก็บ K/V cache ทุก layer
+          2. Decode  — ป้อนทีละ 1 token โดยใช้ cache (O(1) ต่อ step ไม่ใช่ O(T))
+        Local layer จะ cap cache ไว้แค่ sliding_window → memory คงที่ที่ context ยาว
         """
+
+        def _sample(logits: torch.Tensor) -> torch.Tensor:
+            # logits: [B, vocab] → next_token: [B, 1]
+            logits = logits / max(temperature, 1e-6)
+            probs       = F.softmax(logits, dim=-1)
+            sorted_p, sorted_idx = torch.sort(probs, descending=True)
+            cumsum_p    = torch.cumsum(sorted_p, dim=-1)
+            remove_mask = cumsum_p - sorted_p > top_p
+            sorted_p[remove_mask] = 0.0
+            sorted_p    = sorted_p / sorted_p.sum(dim=-1, keepdim=True)
+            choice      = torch.multinomial(sorted_p, num_samples=1)
+            return sorted_idx.gather(-1, choice)   # map back to vocab id
+
         was_training = self.training
         self.eval()
         try:
             generated = input_ids.clone()
+            B         = input_ids.shape[0]
+            finished  = torch.zeros(B, dtype=torch.bool, device=input_ids.device)
 
-            for _ in range(max_new_tokens):
-                out    = self.forward(generated, return_dict=True)
-                logits = out["logits"][:, -1, :]   # [B, vocab] — last token only
+            # ── 1. Prefill ────────────────────────────────────────────
+            #   past_len=0 → RoPE ใช้ตำแหน่ง 0..T-1 อัตโนมัติ (ไม่ต้องส่ง position_ids)
+            cur_len = generated.shape[1]
+            x       = self.embed_tokens(generated)
+            past    = []
+            for layer in self.layers:
+                x, present = layer(x, position_ids=None, use_cache=True)
+                past.append(present)
+            logits     = self.lm_head(self.norm(x)[:, -1, :])   # [B, vocab]
+            next_token = _sample(logits)
+            generated  = torch.cat([generated, next_token], dim=1)
+            finished  |= (next_token.squeeze(1) == eos_token_id)
 
-                # Temperature
-                logits = logits / max(temperature, 1e-6)
-
-                # Top-p (nucleus) sampling
-                probs       = F.softmax(logits, dim=-1)
-                sorted_p, sorted_idx = torch.sort(probs, descending=True)
-                cumsum_p    = torch.cumsum(sorted_p, dim=-1)
-                remove_mask = cumsum_p - sorted_p > top_p
-                sorted_p[remove_mask] = 0.0
-                sorted_p    = sorted_p / sorted_p.sum(dim=-1, keepdim=True)
-
-                next_token  = torch.multinomial(sorted_p, num_samples=1)
-                next_token  = sorted_idx.gather(-1, next_token)   # map back
-
-                generated = torch.cat([generated, next_token], dim=1)
-
-                # Stop ถ้าทุก sequence เจอ EOS
-                if (next_token == eos_token_id).all():
+            # ── 2. Decode (1 token / step via cache) ──────────────────
+            #   ⚠️ ต้องส่ง position_ids = ตำแหน่งสัมบูรณ์จริง เพราะ local layer
+            #   cap cache ไว้แค่ window → past_len ของแต่ละ layer ไม่ตรงตำแหน่งจริง
+            for _ in range(max_new_tokens - 1):
+                if finished.all():
                     break
+                x        = self.embed_tokens(next_token)        # [B, 1, hidden]
+                position_ids = torch.full(
+                    (next_token.shape[0], 1), cur_len,
+                    dtype=torch.long, device=next_token.device,
+                )
+                new_past = []
+                for i, layer in enumerate(self.layers):
+                    x, present = layer(
+                        x, position_ids=position_ids,
+                        past_key_value=past[i], use_cache=True,
+                    )
+                    new_past.append(present)
+                past       = new_past
+                cur_len   += 1
+                logits     = self.lm_head(self.norm(x)[:, -1, :])
+                next_token = _sample(logits)
+                generated  = torch.cat([generated, next_token], dim=1)
+                finished  |= (next_token.squeeze(1) == eos_token_id)
         finally:
             self.train(was_training)
 
